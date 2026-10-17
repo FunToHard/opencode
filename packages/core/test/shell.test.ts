@@ -62,6 +62,23 @@ describe("shell", () => {
     ])
   })
 
+  test("injects directory pruning preamble when prune is enabled", () => {
+    const shArgs = ShellSelect.args("/bin/bash", "ls -la", { prune: true })
+    expect(shArgs[0]).toBe("-c")
+    expect(shArgs[1]).toContain("ls()")
+    expect(shArgs[1]).toContain("node_modules")
+    expect(shArgs[1]).toContain("ls -la")
+
+    const psArgs = ShellSelect.args("pwsh", "ls", { prune: true })
+    expect(psArgs).toContain("-Command")
+    expect(psArgs[4]).toContain("function Get-ChildItem")
+    expect(psArgs[4]).toContain("node_modules")
+    expect(psArgs[4]).toContain("ls")
+
+    const rawArgs = ShellSelect.args("/bin/bash", "ls", { prune: false })
+    expect(rawArgs).toEqual(["-c", "ls"])
+  })
+
   if (process.platform !== "win32") {
     test("resolves the environment shell without retaining a removed executable", async () => {
       await withShell(undefined, async () => {
