@@ -277,7 +277,7 @@ const layer = () =>
 
         const id = Shell.ID.ascending()
         const shouldPrune =
-          input.prune ?? (process.env.OPENCODE_NO_SHELL_PRUNE !== "1" && process.env.OPENCODE_NO_PRUNE !== "1")
+          input.prune === true && process.env.OPENCODE_NO_SHELL_PRUNE !== "1" && process.env.OPENCODE_NO_PRUNE !== "1"
         const args = ShellSelect.args(invocation.shell, invocation.command, { prune: shouldPrune })
         const file = path.join(outputDir, `${id}.out`)
 

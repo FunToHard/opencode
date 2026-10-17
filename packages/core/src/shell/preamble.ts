@@ -4,8 +4,13 @@ export * as ShellPreamble from "./preamble.js"
  * Lightweight PowerShell preamble to prevent context bloat when agents run directory listing commands
  * (`ls`, `dir`, `gci`, `Get-ChildItem`).
  *
- * Automatically excludes noisy directories ('node_modules', 'target', '.git', etc.) while informing
- * the model that items were pruned, and preserving the '-All' override switch and pipeline integrity.
+ * Features:
+ *   - Supports FileSystem dynamic parameters (-File, -Directory, -Hidden, -Attributes, -FollowSymlink) via dynamicparam.
+ *   - Prunes heavy dependency/cache directories ('node_modules', 'target', '.git', '.venv', '__pycache__').
+ *     Note: 'dist' and 'build' are preserved because they are often legitimate project targets.
+ *   - Drops nested contents during -Recurse.
+ *   - Alerts the model via host notice without corrupting object pipelines.
+ *   - Overrideable via -All / -NoPrune or OPENCODE_NO_PRUNE=1.
  */
 export const POWERSHELL_PREAMBLE = `if (-not (Get-Command Get-ChildItem -CommandType Function -ErrorAction SilentlyContinue)) {
   function Get-ChildItem {
@@ -24,6 +29,22 @@ export const POWERSHELL_PREAMBLE = `if (-not (Get-Command Get-ChildItem -Command
       [switch]$Name,
       [Alias('NoFilter','NoPrune')][switch]$All
     )
+    dynamicparam {
+      try {
+        $p = [System.Collections.Generic.Dictionary[string,object]]::new($PSBoundParameters)
+        $p.Remove('All') | Out-Null; $p.Remove('NoFilter') | Out-Null; $p.Remove('NoPrune') | Out-Null
+        $cmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Management\\Get-ChildItem', [System.Management.Automation.CommandTypes]::Cmdlet, $p)
+        if ($cmd) {
+          $dict = [Management.Automation.RuntimeDefinedParameterDictionary]::new()
+          foreach ($dyn in @($cmd.Parameters.Values | Where-Object { $_.IsDynamic })) {
+            if (-not $MyInvocation.MyCommand.Parameters.ContainsKey($dyn.Name)) {
+              $dict.Add($dyn.Name, [Management.Automation.RuntimeDefinedParameter]::new($dyn.Name, $dyn.ParameterType, $dyn.Attributes))
+            }
+          }
+          return $dict
+        }
+      } catch { }
+    }
     process {
       $clean = [System.Collections.Generic.Dictionary[string,object]]::new($PSBoundParameters)
       $clean.Remove('All') | Out-Null; $clean.Remove('NoFilter') | Out-Null; $clean.Remove('NoPrune') | Out-Null
@@ -31,14 +52,23 @@ export const POWERSHELL_PREAMBLE = `if (-not (Get-Command Get-ChildItem -Command
         Microsoft.PowerShell.Management\\Get-ChildItem @clean
         return
       }
-      $prune = @('node_modules','target','.git','.venv','venv','__pycache__','bin','obj','dist','build')
+      $prunePattern = '(?i)[\\\\/](node_modules|target|\\.git|\\.venv|__pycache__)([\\\\/]|$)'
       $items = Microsoft.PowerShell.Management\\Get-ChildItem @clean
       $pruned = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
       foreach ($item in $items) {
-        $n = if ($item -is [System.IO.FileSystemInfo]) { $item.Name } else { "$item" }
-        if ($n -in $prune) {
-          [void]$pruned.Add($n)
+        $isPruned = $false
+        if ($item -is [System.IO.FileSystemInfo]) {
+          if ($item.FullName -match $prunePattern) {
+            $isPruned = $true
+            [void]$pruned.Add($item.Name)
+          }
         } else {
+          if ("$item" -match '(?i)^(node_modules|target|\\.git|\\.venv|__pycache__)$') {
+            $isPruned = $true
+            [void]$pruned.Add("$item")
+          }
+        }
+        if (-not $isPruned) {
           $item
         }
       }
@@ -52,15 +82,25 @@ export const POWERSHELL_PREAMBLE = `if (-not (Get-Command Get-ChildItem -Command
 
 /**
  * Lightweight POSIX shell function for `ls` to prevent context bloat.
- * Uses GNU ls --ignore when available, with fallback and OPENCODE_NO_PRUNE=1 bypass.
+ * Prunes heavy dependency/cache trees ('node_modules', 'target', '.git', '.venv', '__pycache__').
+ * Emits notice to stderr so stdout pipelines (e.g. `ls | wc -l`) are never corrupted.
  */
 export const POSIX_PREAMBLE = `ls() {
   if [ "$OPENCODE_NO_PRUNE" = "1" ] || [ "$OPENCODE_NO_SHELL_PRUNE" = "1" ]; then
     command ls "$@"
     return
   fi
+  _pruned=""
+  for _d in node_modules target .git .venv __pycache__; do
+    if [ -e "$_d" ]; then
+      _pruned="$_pruned $_d"
+    fi
+  done
+  if [ -n "$_pruned" ]; then
+    printf '[OpenCode: Pruned heavy directories:%s. Use "\\\\ls" to view all]\\n' "$_pruned" >&2
+  fi
   if command ls --version >/dev/null 2>&1; then
-    command ls --ignore=node_modules --ignore=target --ignore=.git --ignore=.venv --ignore=__pycache__ --ignore=dist --ignore=build "$@"
+    command ls --ignore=node_modules --ignore=target --ignore=.git --ignore=.venv --ignore=__pycache__ "$@"
   else
     command ls "$@"
   fi
